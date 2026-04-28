@@ -1,4 +1,4 @@
-package decimal
+package fixnum
 
 func GetDigits(s string) int64 {
 	dot := -1

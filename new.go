@@ -1,4 +1,4 @@
-package decimal
+package fixnum
 
 func NewFromString(s string, digits int64) Decimal {
 	var scale int64 = 1
