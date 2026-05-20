@@ -1,5 +1,7 @@
 package fixnum
 
+import "math"
+
 func NewFromString(s string, digits int64) Decimal {
 	var scale int64 = 1
 	for range digits {
@@ -10,8 +12,13 @@ func NewFromString(s string, digits int64) Decimal {
 	var fracPart int64 = 0
 	var fracLen int64 = 0
 	dot := false
+	neg := false
 
-	for _, c := range s {
+	for i, c := range s {
+		if i == 0 && c == '-' {
+			neg = true
+			continue
+		}
 		if c == '.' {
 			dot = true
 			continue
@@ -41,6 +48,9 @@ func NewFromString(s string, digits int64) Decimal {
 	}
 
 	v := intPart*scale + fracPart
+	if neg {
+		v = -v
+	}
 
 	return Decimal{
 		v:     v,
@@ -106,9 +116,11 @@ func NewZero() Decimal {
 }
 
 func NewFromStringWithScale(s string, scale int64) Decimal {
+	scaleCopy := scale
+
 	var digits int64 = 0
-	for scale > 1 {
-		scale /= 10
+	for scaleCopy > 1 {
+		scaleCopy /= 10
 		digits++
 	}
 
@@ -155,7 +167,7 @@ func NewFromStringWithScale(s string, scale int64) Decimal {
 }
 
 func NewFromFloat64WithScale(f float64, scale int64) Decimal {
-	v := int64(f * float64(scale))
+	v := int64(math.Round(f * float64(scale)))
 
 	return Decimal{
 		v:     v,

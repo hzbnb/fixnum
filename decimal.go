@@ -1,7 +1,12 @@
 package fixnum
 
 import (
+	"math"
+	"runtime/debug"
 	"strconv"
+	"strings"
+
+	"go.uber.org/zap"
 )
 
 type Decimal struct {
@@ -34,21 +39,49 @@ func (d Decimal) Sub(o Decimal) Decimal {
 }
 
 func (d Decimal) Mul(o Decimal) Decimal {
-	// (d.v / d.scale) * (o.v / o.scale)
-	// = (d.v * o.v) / (d.scale * o.scale)
+	if d.scale == 0 || o.scale == 0 {
+		targetScale := max(o.scale, d.scale)
+		if targetScale == 0 {
+			targetScale = 1
+		}
+		zap.S().Errorf("❌ Invalid scale in Decimal.Mul, d: %+v, o: %+v stack:\n%s", d, o, string(debug.Stack()))
+		return Decimal{
+			v:     0,
+			scale: targetScale,
+		}
+	}
 
-	// 我们要保持 d.scale：
-	// => (d.v * o.v) / o.scale
+	if mulWillOverflow(d.v, o.v) {
+		d = d.loopCompressBy10()
+		o = o.loopCompressBy10()
+		if mulWillOverflow(d.v, o.v) {
+			targetScale := max(o.scale, d.scale)
+			zap.S().Errorf("❌ Overflow in Decimal.Mul after compression, d: %+v, o: %+v stack:\n%s", d, o, string(debug.Stack()))
+			return Decimal{
+				v:     0,
+				scale: targetScale,
+			}
+		}
+	}
+
+	targetScale := max(o.scale, d.scale)
+
+	if targetScale == d.scale {
+		return Decimal{
+			v:     (d.v * o.v) / o.scale,
+			scale: d.scale,
+		}
+	}
 
 	return Decimal{
-		v:     (d.v * o.v) / o.scale,
-		scale: d.scale,
+		v:     (d.v * o.v) / d.scale,
+		scale: o.scale,
 	}
 }
 
 func (d Decimal) Div(o Decimal) Decimal {
 	if o.v == 0 {
-		// zap.S().Errorf("❌ Division by zero in Decimal.Div, d: %+v, o: %+v", d, o)
+		zap.S().Errorf("❌ Division by zero in Decimal.Div, d: %+v, o: %+v", d, o)
 		return Decimal{v: 0, scale: d.scale} // 或者 panic
 	}
 
@@ -63,28 +96,54 @@ func (d Decimal) Div(o Decimal) Decimal {
 	}
 }
 
+// 取余数
+func (d Decimal) Mod(o Decimal) Decimal {
+	if o.v == 0 {
+		zap.S().Errorf("❌ Mod by zero in Decimal.Mod, d: %+v, o: %+v", d, o)
+		return Decimal{v: 0, scale: d.scale}
+	}
+
+	targetScale := max(o.scale, d.scale)
+
+	d = d.alignUp(targetScale)
+	o = o.alignUp(targetScale)
+
+	return Decimal{
+		v:     d.v % o.v,
+		scale: targetScale,
+	}
+}
+
 func (d Decimal) String() string {
 	if d.scale == 0 {
 		return "0"
 	}
-	intPart := d.v / d.scale
-	fracPart := d.v % d.scale
+	sign := ""
+	v := uint64(d.v)
+	if d.v < 0 {
+		sign = "-"
+		v = uint64(-(d.v + 1)) + 1
+	}
 
-	intStr := strconv.FormatInt(intPart, 10)
-	decStr := strconv.FormatInt(fracPart, 10)
+	scale := uint64(d.scale)
+	intPart := v / scale
+	fracPart := v % scale
+
+	intStr := sign + strconv.FormatUint(intPart, 10)
+	decStr := strconv.FormatUint(fracPart, 10)
 
 	// 补零
 	for len(decStr) < len(strconv.FormatInt(d.scale-1, 10)) {
 		decStr = "0" + decStr
 	}
 
-	// // ✅ 去掉右侧多余的 0
-	// decStr = strings.TrimRight(decStr, "0")
+	// ✅ 去掉右侧多余的 0. 兼容gate等交易所不允许小数末尾有多余的0的情况
+	decStr = strings.TrimRight(decStr, "0")
 
-	// // ⚠️ 如果小数全是 0，直接返回整数
-	// if decStr == "" {
-	// 	return intStr
-	// }
+	// ⚠️ 如果小数全是 0，直接返回整数
+	if decStr == "" {
+		return intStr
+	}
 
 	return intStr + "." + decStr
 }
@@ -133,6 +192,22 @@ func (d Decimal) Lte(o Decimal) bool {
 	return d.cmp(o) <= 0
 }
 
+// 绝对值
+func (d Decimal) Abs() Decimal {
+	if d.v < 0 {
+		return Decimal{
+			v:     -d.v,
+			scale: d.scale,
+		}
+	}
+	return d
+}
+
+// 是否为0
+func (d Decimal) IsZero() bool {
+	return d.v == 0
+}
+
 // ================================[内部函数]====================================
 
 func (d Decimal) alignUp(targetScale int64) Decimal {
@@ -141,11 +216,11 @@ func (d Decimal) alignUp(targetScale int64) Decimal {
 	}
 
 	if d.scale > targetScale {
-		// zap.S().Errorf("❌ Precision loss not allowed in Decimal.alignUp, d: %+v, targetScale: %d", d, targetScale)
+		zap.S().Errorf("❌ Precision loss not allowed in Decimal.alignUp, d: %+v, targetScale: %d", d, targetScale)
 	}
 
 	if d.scale == 0 {
-		// zap.S().Errorf("❌ Invalid scale in Decimal.alignUp, d: %+v, targetScale: %d", d, targetScale)
+		zap.S().Errorf("❌ Invalid scale in Decimal.alignUp, d: %+v, targetScale: %d stack:\n%s", d, targetScale, string(debug.Stack()))
 		d.scale = 1
 	}
 
@@ -154,6 +229,46 @@ func (d Decimal) alignUp(targetScale int64) Decimal {
 		v:     d.v * factor,
 		scale: targetScale,
 	}
+}
+
+func (d Decimal) compressBy10() (Decimal, bool) {
+	if d.v%10 != 0 || d.scale%10 != 0 {
+		return d, false
+	}
+
+	return Decimal{
+		v:     d.v / 10,
+		scale: d.scale / 10,
+	}, true
+}
+
+func (d Decimal) loopCompressBy10() Decimal {
+	for {
+		compressed, ok := d.compressBy10()
+		if !ok {
+			return d
+		}
+		d = compressed
+	}
+}
+
+func mulWillOverflow(a, b int64) bool {
+	if a == 0 || b == 0 {
+		return false
+	}
+
+	if a > 0 {
+		if b > 0 {
+			return a > math.MaxInt64/b
+		}
+		return b < math.MinInt64/a
+	}
+
+	if b > 0 {
+		return a < math.MinInt64/b
+	}
+
+	return b < math.MaxInt64/a
 }
 
 func (d Decimal) cmp(o Decimal) int {
